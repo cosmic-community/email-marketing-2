@@ -1,7 +1,7 @@
 // app/api/campaigns/[id]/send/route.ts
 import { NextRequest, NextResponse } from 'next/server'
 import { getMarketingCampaign, updateCampaignStatus } from '@/lib/cosmic'
-import { resend } from '@/lib/resend'
+import { resend, isValidEmail, sanitizeHtmlContent } from '@/lib/resend'
 
 export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -50,6 +50,18 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
 
     for (const contact of targetContacts) {
       try {
+        // Validate email address
+        if (!contact.metadata?.email || !isValidEmail(contact.metadata.email)) {
+          bouncedCount++
+          errors.push(`Invalid email address: ${contact.metadata?.email}`)
+          continue
+        }
+
+        // Skip inactive contacts
+        if (contact.metadata?.status?.value !== 'Active') {
+          continue
+        }
+
         // Personalize email content
         let emailContent = template.metadata.content || ''
         let emailSubject = template.metadata.subject || ''
@@ -64,21 +76,44 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
           emailSubject = emailSubject.replace(/\{\{last_name\}\}/g, contact.metadata.last_name)
         }
 
+        // Add current month and year variables
+        const now = new Date()
+        const monthNames = ['January', 'February', 'March', 'April', 'May', 'June',
+          'July', 'August', 'September', 'October', 'November', 'December']
+        const currentMonth = monthNames[now.getMonth()]
+        const currentYear = now.getFullYear().toString()
+
+        emailContent = emailContent.replace(/\{\{month\}\}/g, currentMonth)
+        emailContent = emailContent.replace(/\{\{year\}\}/g, currentYear)
+        emailSubject = emailSubject.replace(/\{\{month\}\}/g, currentMonth)
+        emailSubject = emailSubject.replace(/\{\{year\}\}/g, currentYear)
+
+        // Sanitize HTML content
+        emailContent = sanitizeHtmlContent(emailContent)
+
         // Send email via Resend
         const emailResult = await resendClient.emails.send({
-          from: 'onboarding@resend.dev', // Use your verified domain
-          to: [contact.metadata?.email || ''],
+          from: 'onboarding@resend.dev', // Use your verified domain when available
+          to: [contact.metadata.email],
           subject: emailSubject,
           html: emailContent,
+          // Add tags for tracking
+          tags: [
+            { name: 'campaign_id', value: id },
+            { name: 'template_id', value: template.id },
+            { name: 'contact_id', value: contact.id }
+          ]
         })
 
         if (emailResult.data) {
           sentCount++
           deliveredCount++
+          console.log(`Email sent successfully to ${contact.metadata.email}, ID: ${emailResult.data.id}`)
         }
-      } catch (emailError) {
+      } catch (emailError: any) {
         bouncedCount++
-        errors.push(`Failed to send to ${contact.metadata?.email}: ${emailError}`)
+        const errorMessage = emailError?.message || 'Unknown error'
+        errors.push(`Failed to send to ${contact.metadata?.email}: ${errorMessage}`)
         console.error(`Failed to send email to ${contact.metadata?.email}:`, emailError)
       }
     }
@@ -101,20 +136,33 @@ export async function POST(request: NextRequest, { params }: { params: Promise<{
     // Update campaign status to 'Sent'
     await updateCampaignStatus(id, 'Sent', stats)
 
+    // Prepare response message
+    const message = sentCount > 0 
+      ? `Campaign sent successfully! ${sentCount} emails sent${bouncedCount > 0 ? `, ${bouncedCount} bounced` : ''}.`
+      : `Campaign completed with ${bouncedCount} bounced emails. No emails were sent successfully.`
+
     return NextResponse.json({
       success: true,
-      message: `Campaign sent successfully! ${sentCount} emails sent, ${bouncedCount} bounced.`,
+      message,
       stats,
       errors: errors.length > 0 ? errors : undefined
     })
 
-  } catch (error) {
+  } catch (error: any) {
     console.error('Error sending campaign:', error)
     
     // Handle specific Resend API key error
-    if (error instanceof Error && error.message.includes('RESEND_API_KEY')) {
+    if (error?.message?.includes('RESEND_API_KEY')) {
       return NextResponse.json(
-        { error: 'Email service is not configured. Please add your Resend API key.' },
+        { error: 'Email service is not configured. Please add your Resend API key to environment variables.' },
+        { status: 500 }
+      )
+    }
+
+    // Handle Resend API errors
+    if (error?.name === 'ResendError' || error?.status) {
+      return NextResponse.json(
+        { error: `Email service error: ${error.message}` },
         { status: 500 }
       )
     }
