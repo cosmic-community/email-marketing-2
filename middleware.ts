@@ -1,28 +1,31 @@
-import { NextRequest, NextResponse } from 'next/server'
+import { NextResponse } from 'next/server'
+import type { NextRequest } from 'next/server'
 
 export function middleware(request: NextRequest) {
-  // Skip middleware for static assets and API routes that don't need auth
-  const pathname = request.nextUrl.pathname
-  
-  // Allow access to login page, static assets, and console capture script
+  const { pathname } = request.nextUrl
+
+  // Skip middleware for API routes (except auth), static files, and login page
   if (
-    pathname === '/login' ||
+    pathname.startsWith('/api/auth') ||
     pathname.startsWith('/_next') ||
     pathname.startsWith('/static') ||
-    pathname === '/favicon.ico' ||
-    pathname === '/dashboard-console-capture.js' ||
-    pathname.startsWith('/api/auth')
+    pathname.includes('.') ||
+    pathname === '/login'
   ) {
     return NextResponse.next()
   }
 
-  // Check if user is authenticated
-  const authCookie = request.cookies.get('email-marketing-auth')
-  
-  if (!authCookie || authCookie.value !== 'authenticated') {
-    // Redirect to login page
-    const loginUrl = new URL('/login', request.url)
-    return NextResponse.redirect(loginUrl)
+  // Check for authentication token
+  const authToken = request.cookies.get('auth-token')?.value
+
+  // If no auth token and not on login page, redirect to login
+  if (!authToken && pathname !== '/login') {
+    return NextResponse.redirect(new URL('/login', request.url))
+  }
+
+  // If authenticated and on login page, redirect to dashboard
+  if (authToken && pathname === '/login') {
+    return NextResponse.redirect(new URL('/', request.url))
   }
 
   return NextResponse.next()
@@ -31,11 +34,13 @@ export function middleware(request: NextRequest) {
 export const config = {
   matcher: [
     /*
-     * Match all request paths except for the ones starting with:
+     * Match all request paths except:
+     * - api routes (except auth)
      * - _next/static (static files)
      * - _next/image (image optimization files)
      * - favicon.ico (favicon file)
+     * - public files (public folder)
      */
-    '/((?!_next/static|_next/image|favicon.ico).*)',
+    '/((?!api/(?!auth)|_next/static|_next/image|favicon.ico|public/).*)',
   ],
 }
