@@ -1,10 +1,25 @@
 import { Resend } from 'resend'
 
-if (!process.env.RESEND_API_KEY) {
-  throw new Error('RESEND_API_KEY environment variable is not set')
+// Don't check environment variable at import time - check when resend is used
+let resendInstance: Resend | null = null
+
+function getResendInstance(): Resend {
+  if (!resendInstance) {
+    if (!process.env.RESEND_API_KEY) {
+      throw new Error('RESEND_API_KEY environment variable is not set')
+    }
+    resendInstance = new Resend(process.env.RESEND_API_KEY)
+  }
+  return resendInstance
 }
 
-export const resend = new Resend(process.env.RESEND_API_KEY)
+export const resend = {
+  emails: {
+    send: (options: SendEmailOptions) => {
+      return getResendInstance().emails.send(options)
+    }
+  }
+}
 
 // Type definitions for Resend API responses based on actual Resend library types
 export interface SendEmailOptions {
