@@ -3,100 +3,122 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getMarketingCampaign, updateCampaignStatus } from '@/lib/cosmic'
 import { resend } from '@/lib/resend'
 
-export async function POST(
-  request: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
-) {
+export async function POST(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     const { id } = await params
     
     // Get the campaign
     const campaign = await getMarketingCampaign(id)
     if (!campaign) {
-      return NextResponse.json(
-        { error: 'Campaign not found' },
-        { status: 404 }
-      )
+      return NextResponse.json({ error: 'Campaign not found' }, { status: 404 })
     }
 
-    // Check if campaign can be sent
+    // Check if campaign is in draft status
     if (campaign.metadata?.status?.value !== 'Draft') {
       return NextResponse.json(
-        { error: 'Campaign can only be sent from Draft status' },
+        { error: 'Only draft campaigns can be sent' },
         { status: 400 }
       )
     }
 
-    // Get target contacts
+    // Validate template and contacts
+    const template = campaign.metadata?.template
     const targetContacts = campaign.metadata?.target_contacts || []
+
+    if (!template || !template.metadata) {
+      return NextResponse.json(
+        { error: 'Campaign template is required' },
+        { status: 400 }
+      )
+    }
+
     if (targetContacts.length === 0) {
       return NextResponse.json(
-        { error: 'No target contacts found' },
+        { error: 'At least one contact is required' },
         { status: 400 }
       )
     }
 
-    // Get email template content
-    const template = campaign.metadata?.template
-    if (!template?.metadata) {
-      return NextResponse.json(
-        { error: 'Campaign template not found' },
-        { status: 400 }
-      )
-    }
+    // Initialize Resend client (this will throw an error if API key is missing)
+    const resendClient = resend()
 
+    // Send emails to all target contacts
     let sentCount = 0
+    let deliveredCount = 0
     let bouncedCount = 0
+    const errors: string[] = []
 
-    // Send emails to each contact
     for (const contact of targetContacts) {
       try {
-        // Replace template variables with contact data
+        // Personalize email content
         let emailContent = template.metadata.content || ''
         let emailSubject = template.metadata.subject || ''
-        
-        emailContent = emailContent.replace(/\{\{first_name\}\}/g, contact.metadata?.first_name || 'Friend')
-        emailContent = emailContent.replace(/\{\{last_name\}\}/g, contact.metadata?.last_name || '')
-        emailSubject = emailSubject.replace(/\{\{first_name\}\}/g, contact.metadata?.first_name || 'Friend')
-        emailSubject = emailSubject.replace(/\{\{last_name\}\}/g, contact.metadata?.last_name || '')
+
+        // Replace template variables with contact data
+        if (contact.metadata?.first_name) {
+          emailContent = emailContent.replace(/\{\{first_name\}\}/g, contact.metadata.first_name)
+          emailSubject = emailSubject.replace(/\{\{first_name\}\}/g, contact.metadata.first_name)
+        }
+        if (contact.metadata?.last_name) {
+          emailContent = emailContent.replace(/\{\{last_name\}\}/g, contact.metadata.last_name)
+          emailSubject = emailSubject.replace(/\{\{last_name\}\}/g, contact.metadata.last_name)
+        }
 
         // Send email via Resend
-        await resend.emails.send({
-          from: 'Email Marketing <noreply@yourdomain.com>',
+        const emailResult = await resendClient.emails.send({
+          from: 'onboarding@resend.dev', // Use your verified domain
           to: [contact.metadata?.email || ''],
           subject: emailSubject,
           html: emailContent,
         })
 
-        sentCount++
+        if (emailResult.data) {
+          sentCount++
+          deliveredCount++
+        }
       } catch (emailError) {
-        console.error(`Failed to send email to ${contact.metadata?.email}:`, emailError)
         bouncedCount++
+        errors.push(`Failed to send to ${contact.metadata?.email}: ${emailError}`)
+        console.error(`Failed to send email to ${contact.metadata?.email}:`, emailError)
       }
     }
 
-    // Update campaign status and stats
+    // Calculate stats
+    const openRate = sentCount > 0 ? '0%' : '0%' // Will be updated by email tracking
+    const clickRate = sentCount > 0 ? '0%' : '0%' // Will be updated by email tracking
+
     const stats = {
       sent: sentCount,
-      delivered: sentCount,
-      opened: 0,
-      clicked: 0,
+      delivered: deliveredCount,
+      opened: 0, // Will be updated by email tracking
+      clicked: 0, // Will be updated by email tracking
       bounced: bouncedCount,
       unsubscribed: 0,
-      open_rate: '0%',
-      click_rate: '0%'
+      open_rate: openRate,
+      click_rate: clickRate
     }
 
+    // Update campaign status to 'Sent'
     await updateCampaignStatus(id, 'Sent', stats)
 
     return NextResponse.json({
       success: true,
-      message: `Campaign sent successfully to ${sentCount} recipients`,
-      stats
+      message: `Campaign sent successfully! ${sentCount} emails sent, ${bouncedCount} bounced.`,
+      stats,
+      errors: errors.length > 0 ? errors : undefined
     })
 
   } catch (error) {
     console.error('Error sending campaign:', error)
+    
+    // Handle specific Resend API key error
+    if (error instanceof Error && error.message.includes('RESEND_API_KEY')) {
+      return NextResponse.json(
+        { error: 'Email service is not configured. Please add your Resend API key.' },
+        { status: 500 }
+      )
+    }
+
     return NextResponse.json(
       { error: 'Failed to send campaign' },
       { status: 500 }
